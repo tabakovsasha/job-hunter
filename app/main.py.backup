@@ -1,0 +1,159 @@
+"""Main application logic"""
+
+import logging
+import sys
+from typing import List
+
+from app.models import Vacancy
+from app.storage import VacancyStorage
+from app.telegram import TelegramNotifier
+from app.providers.vk import VKProvider
+from app.providers.yandex import YandexProvider
+from app.config import (
+    ENABLE_VK,
+    ENABLE_YANDEX,
+    SEARCH_QUERIES,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID
+)
+
+logger = logging.getLogger(__name__)
+
+
+def setup_logging():
+    """Configure logging"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+
+def get_enabled_providers() -> List:
+    """Get list of enabled providers"""
+    providers = []
+    
+    if ENABLE_VK:
+        providers.append(VKProvider())
+    
+    if ENABLE_YANDEX:
+        providers.append(YandexProvider())
+    
+    return providers
+
+
+def process_provider(provider, query: str, storage: VacancyStorage, notifier: TelegramNotifier) -> tuple[int, int]:
+    """
+    Process a single provider.
+    
+    Returns:
+        Tuple of (total_found, new_count)
+    """
+    try:
+        # Fetch vacancies
+        vacancies = provider.get_vacancies(query)
+        
+        # Check if this is first run for this source
+        is_initial_scan = not storage.is_source_initialized(provider.name)
+        
+        if is_initial_scan:
+            logger.info(f"[{provider.name.upper()}] Initial scan, saving {len(vacancies)} vacancies without notifications")
+            storage.add_vacancies(vacancies)
+            storage.mark_source_initialized(provider.name)
+            return len(vacancies), 0
+        
+        # Filter to new vacancies only
+        new_vacancies = storage.get_new_vacancies(vacancies)
+        
+        logger.info(f"[{provider.name.upper()}] New vacancies: {len(new_vacancies)}")
+        
+        # Send notifications for new vacancies
+        notification_failures = []
+        for vacancy in new_vacancies:
+            success = notifier.send_vacancy_notification(vacancy)
+            if not success:
+                notification_failures.append(vacancy)
+        
+        # Only mark vacancies as known if notification succeeded
+        # This allows retry on next run
+        if notification_failures:
+            logger.warning(f"[{provider.name.upper()}] Failed to send {len(notification_failures)} notifications, will retry next time")
+            # Add only successfully notified vacancies
+            successfully_notified = [v for v in new_vacancies if v not in notification_failures]
+            storage.add_vacancies(successfully_notified)
+        else:
+            # All notifications sent successfully
+            storage.add_vacancies(new_vacancies)
+        
+        return len(vacancies), len(new_vacancies)
+        
+    except Exception as e:
+        logger.error(f"[{provider.name.upper()}] Failed to process: {e}", exc_info=True)
+        return 0, 0
+
+
+def main():
+    """Main application entry point"""
+    setup_logging()
+    
+    logger.info("Starting vacancy check")
+    
+    # Validate Telegram configuration
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("Telegram credentials not configured. Notifications will be skipped.")
+        logger.warning("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env file")
+    
+    # Initialize components
+    storage = VacancyStorage()
+    notifier = TelegramNotifier()
+    providers = get_enabled_providers()
+    
+    if not providers:
+        logger.error("No providers enabled. Set ENABLE_VK=true or ENABLE_YANDEX=true in .env")
+        sys.exit(1)
+    
+    if not SEARCH_QUERIES:
+        logger.error("No search queries configured. Set SEARCH_QUERIES in .env")
+        sys.exit(1)
+    
+    logger.info(f"Enabled providers: {[p.name for p in providers]}")
+    logger.info(f"Search queries: {SEARCH_QUERIES}")
+    
+    # Process each provider
+    total_found = 0
+    total_new = 0
+    
+    for provider in providers:
+        for query in SEARCH_QUERIES:
+            found, new = process_provider(provider, query, storage, notifier)
+            total_found += found
+            total_new += new
+    
+    # Save state
+    try:
+        storage.save()
+        logger.info("State saved successfully")
+    except Exception as e:
+        logger.error(f"Failed to save state: {e}")
+        sys.exit(1)
+    
+    # Summary
+    stats = storage.get_stats()
+    logger.info(f"Vacancy check completed")
+    logger.info(f"Total vacancies found this run: {total_found}")
+    logger.info(f"New vacancies: {total_new}")
+    logger.info(f"Total vacancies in database: {stats['total_vacancies']}")
+    
+    if total_new > 0:
+        logger.info(f"Sent {total_new} Telegram notifications")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}", exc_info=True)
+        sys.exit(1)

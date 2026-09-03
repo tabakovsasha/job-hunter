@@ -1,0 +1,14 @@
+[Unit]
+Description=Job Hunter Vacancy Watcher Timer
+Requires=vacancy-watcher.service
+
+[Timer]
+# Run every hour
+OnCalendar=hourly
+# Run immediately if last run was missed (e.g., system was off)
+Persistent=true
+# Randomize start time by up to 5 minutes to avoid load spikes
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
