@@ -53,22 +53,22 @@ class YandexProvider:
                 if not href:
                     continue
                 
-                # Extract ID from URL
-                match = re.search(r'/jobs/vacancies/[^/]+-(\d+)', href)
-                if not match:
-                    # Try alternative pattern
+                # Extract ID from URL - try numeric ID at end first
+                match = re.search(r'-(\d+)$', href.rstrip('/'))
+                if match:
+                    vac_id = match.group(1)
+                else:
+                    # Try /jobs/vacancies/123 pattern
                     match = re.search(r'/jobs/vacancies/(\d+)', href)
-                    if not match:
-                        # Use slug as ID if numeric ID not found
+                    if match:
+                        vac_id = match.group(1)
+                    else:
+                        # Use full slug as fallback
                         slug_match = re.search(r'/jobs/vacancies/([^/?]+)', href)
                         if slug_match:
                             vac_id = slug_match.group(1).split('?')[0]
                         else:
                             continue
-                    else:
-                        vac_id = match.group(1)
-                else:
-                    vac_id = match.group(1)
                 
                 title = link.get_text(strip=True)
                 
